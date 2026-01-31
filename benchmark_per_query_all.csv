@@ -1,0 +1,1 @@
+query_set,strategy,cache_mode,token_threshold,query_index,query_text,expected_device,device_used,cache_hit,routing_method,routing_confidence,routing_reasoning,routing_overhead_ms,start_time,end_time,latency_ms,response_tokens,energy_mJ,latency_per_token_ms,energy_per_token_mJ
