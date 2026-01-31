@@ -30,5 +30,25 @@
   {"text":"I’m experiencing frequent migraines that seem to worsen with stress, diet changes, and lack of sleep. Please provide a detailed analysis including potential triggers, dietary recommendations, lifestyle adjustments, and guidance on when to seek medical attention.","label":"orin"},
   {"text":"Over the past few weeks, I've felt unusually fatigued, accompanied by mild dizziness and shortness of breath during mild exertion. Provide a structured symptom analysis, suggesting potential causes, recommended diagnostic steps, and the urgency of consulting a healthcare provider.","label":"orin"},
   {"text":"I want to prepare for my first marathon in six months, but I have limited running experience. Generate a comprehensive and personalized six-month training plan including mileage progression, cross-training, injury prevention strategies, nutritional guidelines, and hydration recommendations.","label":"orin"},
-  {"text":"I’ve been feeling persistently sad, withdrawn from social activities, and unmotivated for over a month. Simulate a confidential mental health consultation.","label":"orin"}
+  {"text":"I’ve been feeling persistently sad, withdrawn from social activities, and unmotivated for over a month. Simulate a confidential mental health consultation.","label":"orin"},
+  
+  {"text": "Hello there", "label": "nano"},
+  {"text": "Good morning assistant", "label": "nano"},
+  {"text": "What is 25 + 25?", "label": "nano"},
+  {"text": "Calculate 100 divided by 5.", "label": "nano"},
+  {"text": "Who is the president of the USA?", "label": "nano"},
+  {"text": "What is the capital of Japan?", "label": "nano"},
+  {"text": "Define the word 'sun'.", "label": "nano"},
+  {"text": "How many days are in a week?", "label": "nano"},
+  {"text": "Tell me a joke.", "label": "nano"},
+  {"text": "What time is it?", "label": "nano"},
+
+  {"text": "Write a short story about a robot who learns to love.", "label": "orin"},
+  {"text": "Debug this C++ code snippet and explain the memory leak.", "label": "orin"},
+  {"text": "Analyze the themes of betrayal in Hamlet.", "label": "orin"},
+  {"text": "Create a 5-day itinerary for a trip to Paris.", "label": "orin"},
+  {"text": "Explain the difference between TCP and UDP in detail.", "label": "orin"},
+  {"text": "Draft a professional email resigning from my job.", "label": "orin"},
+  {"text": "Translate this paragraph into French and explain the grammar.", "label": "orin"},
+  {"text": "Simulate a conversation between Plato and Socrates.", "label": "orin"}
 ]

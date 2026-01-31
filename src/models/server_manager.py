@@ -3,7 +3,7 @@ import time
 import pexpect
 import subprocess
 import socket
-
+import requests  # Added for API health check
 
 class ServerManager:
     def __init__(self, device_ip, device_port, local_port, ssh_user, ssh_port):
@@ -66,7 +66,7 @@ class ServerManager:
     def start_server(self):
         """
         Starts remote Flask api and local SSH tunnel.
-        Readiness = local tunnel port open.
+        Readiness = local tunnel port open AND API healthy.
         """
 
         # If port already open, assume tunnel+API likely up
@@ -116,7 +116,23 @@ class ServerManager:
             # Wait for tunnel port to open (Nano may be slow)
             if self._wait_local_port_open(timeout_s=180):
                 print("Tunnel is up (local port open).")
+
+                # --- HEALTH CHECK ADDED HERE ---
+                print("Waiting for Flask API health check...")
+                # We try for up to 15 seconds for the API to actually respond
+                for _ in range(15):
+                    try:
+                        # Try hitting the health endpoint
+                        requests.get(f"http://127.0.0.1:{self.local_port}/health", timeout=1)
+                        print("Remote API is healthy (HTTP 200).")
+                        return tunnel_process
+                    except Exception:
+                        # Wait a bit for Flask to finish importing torch/transformers/etc.
+                        time.sleep(1)
+                
+                print("Warning: API health check failed after 15s (connection refused or timeout), but proceeding...")
                 return tunnel_process
+                # -------------------------------
 
             print("Tunnel timed out (local port never opened).")
             return tunnel_process

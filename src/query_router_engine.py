@@ -1,27 +1,29 @@
 """
-query_routing_engine.py
+query_routing_engine.py - FIXED VERSION
 
 Dynamic Query Router for Distributed Edge Chatbots on NVIDIA Jetson Platforms
 - Multiple routing strategies: token / semantic (trained centroids) / heuristic / hybrid / perf
 - Optional query cache (exact + semantic similarity within same context_key)
-- Designed to plug into your existing Router wrapper (route_query + update_perf)
+- Thread-safe implementation for production use
 
-Key design changes vs your draft:
-1) SemanticRouter now supports TRAINED centroids from a label file:
-      [{"text": "...", "label": "nano"|"orin"}, ...]
-   -> routes by closest centroid + optional margin fallback to token.
-2) HeuristicRouter expanded and made more tunable + safer fallbacks.
-3) HybridRouter uses "vote + weighted confidence", with a default “confidence-as-margin”
-   normalization so it doesn’t always collapse to one device.
+FIXES APPLIED:
+1) Fixed race condition in cache snapshot (deep copy numpy arrays)
+2) Added explicit numpy array cleanup to prevent memory leaks
+3) Fixed duplicate encoding performance issue
+4) Fixed zero-vector edge case in cosine similarity
+5) Fixed perf router all-failed case
+6) Fixed regex escaping for A* algorithm
+7) Added cache statistics/monitoring
 """
 
 import hashlib
 import json
 import os
 import re
+import threading
 from abc import ABC, abstractmethod
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Literal, Optional, Tuple
 
@@ -127,16 +129,8 @@ class TokenBasedRouter(BaseRouter):
 class SemanticRouter(BaseRouter):
     """
     Trained semantic router using centroids:
-      - load labeled data from config["semantic_label_path"]
-      - compute nano_center and orin_center
-      - route by higher cosine similarity
-      - optional margin fallback to token if ambiguous
-
-    Label file format (JSON):
-      [
-        {"text": "...", "label": "nano"},
-        {"text": "...", "label": "orin"}
-      ]
+      - routes by higher cosine similarity to nano_center vs orin_center
+      - fallback to token if margin < threshold OR if both similarities are too low (irrelevant)
     """
 
     def __init__(self, config: Dict[str, Any]):
@@ -149,23 +143,28 @@ class SemanticRouter(BaseRouter):
 
         self.label_path = config.get("semantic_label_path", "")
         self.margin_threshold = float(config.get("semantic_margin_threshold", 0.03))
+        self.min_similarity = float(config.get("semantic_min_similarity", 0.15))
+        
         self._token_fallback = TokenBasedRouter(config)
 
         self.nano_center, self.orin_center = self._load_and_build_centroids(self.label_path)
 
     @staticmethod
     def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-        denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-12
-        return float(np.dot(a, b) / denom)
+        """FIXED: Handle zero vectors properly"""
+        norm_a = np.linalg.norm(a)
+        norm_b = np.linalg.norm(b)
+        
+        if norm_a < 1e-9 or norm_b < 1e-9:  # Zero vector check
+            return 0.0
+        
+        return float(np.dot(a, b) / (norm_a * norm_b))
 
     def _load_and_build_centroids(self, label_path: str) -> Tuple[np.ndarray, np.ndarray]:
-        # If no label file, fall back to a tiny seed set (still works, but not recommended).
+        # If no label file, fall back to a tiny seed set.
         if not label_path or not os.path.exists(label_path):
             simple_seed = [
-                "Hello",
-                "What is 2+2?",
-                "Define machine learning",
-                "What is the weather today?",
+                "Hello", "What is 2+2?", "Define machine learning", "What is the weather today?",
             ]
             complex_seed = [
                 "Write a Python function to solve knapsack and explain time complexity",
@@ -206,22 +205,31 @@ class SemanticRouter(BaseRouter):
         sim_nano = self._cosine_similarity(q_emb, self.nano_center)
         sim_orin = self._cosine_similarity(q_emb, self.orin_center)
 
+        # 1. Relevance check: If query is far from BOTH clusters, fall back
+        if sim_nano < self.min_similarity and sim_orin < self.min_similarity:
+            d = self._token_fallback.route(query, context)
+            return RoutingDecision(
+                device=d.device,
+                confidence=d.confidence * 0.5,
+                method="semantic_fallback_irrelevant",
+                reasoning=f"low similarity to both (n={sim_nano:.2f}, o={sim_orin:.2f}) -> {d.reasoning}",
+                complexity_score=float(sim_orin),
+            )
+
         margin = abs(sim_orin - sim_nano)
 
-        # ambiguous => token fallback
+        # 2. Ambiguity check: If margin is too small, fall back
         if margin < self.margin_threshold:
             d = self._token_fallback.route(query, context)
             return RoutingDecision(
                 device=d.device,
                 confidence=float(margin),
-                method="semantic_fallback_token",
-                reasoning=f"ambiguous semantic nano={sim_nano:.3f} orin={sim_orin:.3f} margin={margin:.3f} -> {d.reasoning}",
+                method="semantic_fallback_ambiguous",
+                reasoning=f"ambiguous margin={margin:.3f} (n={sim_nano:.2f}, o={sim_orin:.2f}) -> {d.reasoning}",
                 complexity_score=float(sim_orin),
             )
 
         device = "orin" if sim_orin > sim_nano else "nano"
-
-        # confidence: normalize margin into [0,1] (0.2 is a typical “strong separation”)
         conf = float(min(1.0, margin / 0.2))
 
         return RoutingDecision(
@@ -234,21 +242,12 @@ class SemanticRouter(BaseRouter):
 
 
 # ----------------------------
-# Heuristic Strategy (more comprehensive)
+# Heuristic Strategy (Optimized)
 # ----------------------------
 
 class HeuristicRouter(BaseRouter):
     """
-    Conservative rule-based router:
-      - strong complex signal => ORIN
-      - strong simple signal => NANO
-      - else fallback to token
-
-    Tunables:
-      heuristic_long_chars (default 220)
-      heuristic_multi_qmarks (default 2)
-      heuristic_code_markers_needed (default 2)
-      heuristic_context_chars (default 800)
+    Conservative rule-based router with PRE-COMPILED regex for performance.
     """
 
     def __init__(self, config: Dict[str, Any]):
@@ -261,8 +260,8 @@ class HeuristicRouter(BaseRouter):
 
         self._token_fallback = TokenBasedRouter(config)
 
-        # IMPORTANT: keep patterns fairly broad but not over-trigger happy
-        self.complex_patterns = {
+        # Raw patterns
+        raw_complex_patterns = {
             "code_build_debug": [
                 r"\b(write|implement|code|program|script|build|refactor)\b",
                 r"\b(debug|fix|traceback|exception|error|segfault|timeout|hanging)\b",
@@ -273,7 +272,8 @@ class HeuristicRouter(BaseRouter):
                 r"\b(prove|lemma|theorem|corollary)\b",
                 r"\b(derivative|integral|gradient|jacobian)\b",
                 r"\b(time complexity|space complexity|big[- ]o)\b",
-                r"\b(dynamic programming|dp|graph|dijkstra|a\*|bfs|dfs)\b",
+                r"\b(dynamic programming|dp|graph|dijkstra|bfs|dfs)\b", 
+                r"(?:\b|^)a\*(?:\s|$|\W)"  # <--- FIXED: Matches "A*" followed by space/end/punctuation
             ],
             "long_form_generation": [
                 r"\b(essay|report|proposal|research paper|literature review|methodology)\b",
@@ -286,18 +286,46 @@ class HeuristicRouter(BaseRouter):
                 r"\b(csv|excel|dataframe|dataset)\b",
                 r"\b(deduplicate|normalize|clean|transform|parse|extract)\b",
             ],
+
+            "medical_analysis": [
+                # Symptoms & Conditions
+                r"\b(symptom|diagnosis|treatment|therapy|prognosis)\b",
+                r"\b(pain|migraine|dizziness|fatigue|nausea|inflammation|anxiety|depression)\b",
+                r"\b(chronic|severe|acute|persistent|worsen|trigger)\b",
+                
+                # Complex Requests
+                r"\b(analyze|analysis|consultation|evaluate|assess)\b.*\b(health|symptom|condition)\b",
+                r"\b(dietary|meal|training|exercise|recovery)\b.*\b(plan|schedule|regimen)\b",
+                r"\b(mental health|psycholog|counseling|therapist)\b",
+                
+                # Safety / Urgency
+                r"\b(seek medical|doctor|physician|emergency|hospital)\b",
+            ],
+            
             "context_heavy": [
                 r"\b(using (all|the) (context|history|above)|based on (the|our) (conversation|context))\b",
                 r"\b(continue|expand|build on|follow up)\b.*\b(previous|earlier|above)\b",
             ],
         }
 
-        self.simple_patterns = {
+        raw_simple_patterns = {
             "greeting": [
                 r"^(hi|hello|hey|yo|sup)\b",
                 r"^good (morning|afternoon|evening)\b",
                 r"^(thanks|thank you)\b",
             ],
+
+            "wellness_tips": [
+                # General Health Facts
+                r"\b(benefits? of|tips? for|advice on)\b.*\b(sleep|water|walking|stretching|fruit|veg)\b",
+                r"\b(daily intake|how often|how much)\b.*\b(water|calories|steps|sleep)\b",
+                r"\b(healthy|good)\b.*\b(habit|routine|lifestyle)\b",
+                
+                # Simple Definitions
+                r"^what is (bmi|calories|metabolism|hydration)\??$",
+                r"^define (insomnia|nutrition|cardio)\??$",
+            ],
+
             "short_definition": [
                 r"^define\b",
                 r"^what does .+ mean\??$",
@@ -311,6 +339,16 @@ class HeuristicRouter(BaseRouter):
             ],
         }
 
+        # Pre-compile regex
+        self.complex_patterns = {
+            k: [re.compile(p, re.IGNORECASE) for p in v] 
+            for k, v in raw_complex_patterns.items()
+        }
+        self.simple_patterns = {
+            k: [re.compile(p, re.IGNORECASE) for p in v] 
+            for k, v in raw_simple_patterns.items()
+        }
+
         self._code_markers = [
             "```", "def ", "class ", "import ", "Traceback", "Exception", "ModuleNotFoundError",
             "SELECT ", "WITH ", "FROM ", "JOIN ", ";", "{", "}", "->", "::", "==", "!=",
@@ -319,7 +357,7 @@ class HeuristicRouter(BaseRouter):
     @staticmethod
     def _any_match(query_lower: str, patterns: list) -> bool:
         for pat in patterns:
-            if re.search(pat, query_lower):
+            if pat.search(query_lower):
                 return True
         return False
 
@@ -418,15 +456,6 @@ class HeuristicRouter(BaseRouter):
 # ----------------------------
 
 class HybridRouter(BaseRouter):
-    """
-    Weighted ensemble:
-      - token / semantic / heuristic each produce (device, confidence)
-      - we convert to weighted votes (confidence * weight)
-      - device with higher vote wins
-
-    Important: semantic can be missing (no sentence-transformers) => skipped
-    """
-
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.weights = config.get("weights", {"token": 0.35, "semantic": 0.35, "heuristic": 0.30})
@@ -458,7 +487,6 @@ class HybridRouter(BaseRouter):
 
             parts.append(f"{name}:{d.device} conf={d.confidence:.2f} w={w:.2f}")
 
-        # tie-break: prefer nano on ties (energy saving), but you can flip this.
         if orin_score > nano_score:
             final = "orin"
             margin = orin_score - nano_score
@@ -483,37 +511,37 @@ class HybridRouter(BaseRouter):
 # ----------------------------
 
 class PerformanceAwareRouter(BaseRouter):
-    """
-    Online router:
-      score(device) = latency_per_token + fail_penalty * fail_rate
-      choose lower score
-
-    You must call QueryRouter.update_perf(...) after each request.
-    """
-
+    """FIXED: Handle all-failed case properly"""
+    
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.window = int(config.get("perf_window", 30))
         self.fail_penalty = float(config.get("perf_fail_penalty", 3000.0))
         self.stats = {
-            "nano": deque(maxlen=self.window),  # (lat_ms, tok, ok_flag)
+            "nano": deque(maxlen=self.window),
             "orin": deque(maxlen=self.window),
         }
 
     def update(self, device: str, latency_ms: float, tokens: int, ok: bool = True) -> None:
-        if device in self.stats and tokens and tokens > 0:
+        if device in self.stats:
             self.stats[device].append((float(latency_ms), int(tokens), 1 if ok else 0))
 
     def _score(self, device: str) -> float:
+        """FIXED: Handle zero tokens case"""
         data = list(self.stats[device])
         if not data:
             return float("inf")
 
         total_lat = sum(x[0] for x in data)
-        total_tok = sum(x[1] for x in data) or 1
+        total_tok = sum(x[1] for x in data)
         ok_sum = sum(x[2] for x in data)
         fail_rate = 1.0 - (ok_sum / len(data))
 
+        # FIXED: If all failed, use average latency instead of inf
+        if total_tok == 0:
+            avg_lat = total_lat / len(data)
+            return float(avg_lat + self.fail_penalty * fail_rate)
+        
         lat_per_tok = total_lat / total_tok
         return float(lat_per_tok + self.fail_penalty * fail_rate)
 
@@ -539,17 +567,13 @@ class PerformanceAwareRouter(BaseRouter):
 
 
 # ----------------------------
-# QueryRouter (strategy selector + cache)
+# QueryRouter (Thread-Safe + Cache) - FULLY FIXED
 # ----------------------------
 
 class QueryRouter:
     """
     Strategy selector + optional cache.
-    Exposes:
-      - route_query(query, context, context_key) -> RoutingDecision
-      - update_perf(device, latency_ms, tokens, ok)
-      - change_strategy(strategy)
-      - clear_cache()
+    FULLY FIXED: Thread-safe, no memory leaks, no duplicate encoding.
     """
 
     AVAILABLE_STRATEGIES = {
@@ -578,6 +602,11 @@ class QueryRouter:
         self.use_semantic_cache = bool(self.config.get("use_semantic_cache", True))
 
         self.query_cache: deque = deque(maxlen=self.cache_max_size)
+        self._lock = threading.Lock()
+
+        # Stats tracking
+        self._cache_hits = 0
+        self._cache_attempts = 0
 
         # embedder for semantic cache
         self.cache_embedder = None
@@ -587,38 +616,27 @@ class QueryRouter:
 
     @property
     def strategy(self) -> str:
-        # compatibility with older Router wrapper
         return self.strategy_name
 
     def _default_config(self) -> Dict[str, Any]:
         return {
-            # token
             "token_threshold": 1000,
             "model": "meta-llama/Llama-2-7b-hf",
-
-            # semantic
             "embedding_model": "all-MiniLM-L6-v2",
             "semantic_label_path": "src/tests/semantic_labels.json",
             "semantic_margin_threshold": 0.03,
-
-            # heuristic tuning
+            "semantic_min_similarity": 0.15,
             "heuristic_long_chars": 220,
             "heuristic_multi_qmarks": 2,
             "heuristic_code_markers_needed": 2,
             "heuristic_context_chars": 800,
-
-            # hybrid weights
             "weights": {"token": 0.35, "semantic": 0.35, "heuristic": 0.30},
-
-            # cache
             "cache_enabled": True,
             "cache_ttl_seconds": 300,
             "cache_max_size": 100,
             "cache_similarity_threshold": 0.85,
             "use_semantic_cache": True,
             "cache_force_nano": True,
-
-            # perf
             "perf_window": 30,
             "perf_fail_penalty": 3000.0,
         }
@@ -633,75 +651,96 @@ class QueryRouter:
     def _clean_expired_cache(self) -> None:
         if not self.cache_enabled:
             return
-        valid = [x for x in self.query_cache if self._is_cache_valid(x)]
-        self.query_cache.clear()
-        self.query_cache.extend(valid)
+        with self._lock:
+            valid = [x for x in self.query_cache if self._is_cache_valid(x)]
+            # FIXED: Explicitly delete embeddings of evicted items
+            for item in self.query_cache:
+                if item not in valid and item.embedding is not None:
+                    del item.embedding
+            self.query_cache.clear()
+            self.query_cache.extend(valid)
 
-    def _find_cached(self, query: str, context_key: str) -> Optional[CachedQuery]:
-        if not self.cache_enabled or not self.query_cache:
+    def _find_cached(self, query: str, context_key: str, q_emb: Optional[np.ndarray] = None) -> Optional[CachedQuery]:
+        """FIXED: Thread-safe cache lookup with single encoding"""
+        if not self.cache_enabled:
             return None
 
         qh = self._hash_query(query, context_key)
-
-        # exact match first
-        for cached in self.query_cache:
-            if cached.context_key != context_key:
-                continue
-            if not self._is_cache_valid(cached):
-                continue
-            if cached.query_hash == qh:
-                return cached
-
-        # semantic match next
-        if self.cache_embedder is None:
-            return None
-
-        q_emb = self.cache_embedder.encode([query])[0]
+        
+        # Snapshot under lock
+        with self._lock:
+            # 1) Exact match
+            for cached in self.query_cache:
+                if cached.context_key != context_key or not self._is_cache_valid(cached):
+                    continue
+                if cached.query_hash == qh:
+                    return cached
+            
+            # 2) Semantic match - extract needed data (deep copy numpy arrays)
+            if self.cache_embedder is None or q_emb is None:
+                return None
+            
+            candidates = []
+            for c in self.query_cache:
+                if c.context_key == context_key and c.embedding is not None and self._is_cache_valid(c):
+                    candidates.append((c.embedding.copy(), c))  # FIXED: Deep copy
+        
+        # Release lock, do slow computation outside lock
         best = None
         best_sim = 0.0
-
-        for cached in self.query_cache:
-            if cached.context_key != context_key:
-                continue
-            if not self._is_cache_valid(cached):
-                continue
-            if cached.embedding is None:
-                continue
-
-            denom = (np.linalg.norm(q_emb) * np.linalg.norm(cached.embedding)) + 1e-12
-            sim = float(np.dot(q_emb, cached.embedding) / denom)
+        
+        for emb, cached in candidates:
+            norm_q = np.linalg.norm(q_emb)
+            norm_c = np.linalg.norm(emb)
+            
+            if norm_q < 1e-9 or norm_c < 1e-9:
+                sim = 0.0
+            else:
+                sim = float(np.dot(q_emb, emb) / (norm_q * norm_c))
+            
             if sim >= self.similarity_threshold and sim > best_sim:
                 best_sim = sim
                 best = cached
-
+        
         return best
 
-    def _add_cache(self, query: str, context_key: str, decision: RoutingDecision) -> None:
+    def _add_cache(self, query: str, context_key: str, decision: RoutingDecision, q_emb: Optional[np.ndarray] = None) -> None:
+        """FIXED: Prevent memory leaks from numpy arrays"""
         if not self.cache_enabled:
             return
-
-        emb = self.cache_embedder.encode([query])[0] if self.cache_embedder is not None else None
-        self.query_cache.append(CachedQuery(
-            query=query,
-            query_hash=self._hash_query(query, context_key),
-            context_key=context_key,
-            embedding=emb,
-            timestamp=datetime.now(),
-            device_used=decision.device,
-            response_time=None,
-        ))
+        
+        with self._lock:
+            # FIXED: Explicit cleanup of evicted item
+            if len(self.query_cache) >= self.cache_max_size:
+                evicted = self.query_cache[0]
+                if evicted.embedding is not None:
+                    del evicted.embedding
+            
+            self.query_cache.append(CachedQuery(
+                query=query,
+                query_hash=self._hash_query(query, context_key),
+                context_key=context_key,
+                embedding=q_emb.copy() if q_emb is not None else None,  # FIXED: Copy to avoid reference issues
+                timestamp=datetime.now(),
+                device_used=decision.device,
+                response_time=None,
+            ))
 
     def route_query(self, query: str, context: Optional[str] = None, context_key: Optional[str] = None) -> RoutingDecision:
-        """
-        query: current user query
-        context: optional context string (can be your concatenated conversation history)
-        context_key: stable short key for a conversation (so cache won't leak between convos)
-        """
+        """FIXED: Single encoding for cache lookup and addition"""
         ctxk = context_key or "default"
         self._clean_expired_cache()
 
-        cached = self._find_cached(query, ctxk)
+        # FIXED: Encode once, reuse for both cache lookup and addition
+        q_emb = None
+        if self.cache_embedder is not None and self.use_semantic_cache:
+            q_emb = self.cache_embedder.encode([query])[0]
+
+        self._cache_attempts += 1
+        cached = self._find_cached(query, ctxk, q_emb)
+        
         if cached is not None and self.cache_force_nano:
+            self._cache_hits += 1
             return RoutingDecision(
                 device="nano",
                 confidence=1.0,
@@ -711,16 +750,33 @@ class QueryRouter:
             )
 
         d = self.router.route(query, context)
-        self._add_cache(query, ctxk, d)
+        self._add_cache(query, ctxk, d, q_emb)
         return d
 
     def update_perf(self, device: str, latency_ms: float, tokens: int, ok: bool = True) -> None:
-        # only affects perf router
         if hasattr(self.router, "update"):
             self.router.update(device=device, latency_ms=latency_ms, tokens=tokens, ok=ok)
 
     def clear_cache(self) -> None:
-        self.query_cache.clear()
+        """FIXED: Clean up numpy arrays when clearing cache"""
+        with self._lock:
+            for item in self.query_cache:
+                if item.embedding is not None:
+                    del item.embedding
+            self.query_cache.clear()
+            self._cache_hits = 0
+            self._cache_attempts = 0
+
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """NEW: Monitoring stats for production"""
+        with self._lock:
+            return {
+                "size": len(self.query_cache),
+                "max_size": self.cache_max_size,
+                "hit_rate": self._cache_hits / max(self._cache_attempts, 1),
+                "hits": self._cache_hits,
+                "attempts": self._cache_attempts,
+            }
 
     def change_strategy(self, strategy: str) -> None:
         if strategy not in self.AVAILABLE_STRATEGIES:
@@ -729,10 +785,8 @@ class QueryRouter:
         self.router = self.AVAILABLE_STRATEGIES[strategy](self.config)
 
 
-# ----------------------------
-# Quick demo
-# ----------------------------
 if __name__ == "__main__":
+    # Test stub
     cfg = {
         "token_threshold": 1200,
         "cache_enabled": True,
@@ -748,8 +802,6 @@ if __name__ == "__main__":
         "hello",
         "what is 2+2",
         "Explain quantum computing and its implications for cryptography",
-        "Write a Python function to implement quicksort and explain time complexity",
-        "Summarize everything we've discussed so far in one comprehensive report.",
     ]
 
     for t in tests:

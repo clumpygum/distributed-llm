@@ -674,16 +674,16 @@ def main() -> None:
 
 if __name__ == "__main__":
     # Optional: local default run without CLI typing
-    import sys
-    sys.argv += [
-        "--query-set", "general_knowledge",
-        "--thresholds", "100", "1000", "4000",
-        "--fixed-threshold", "4000",              # non-token runs once at 4000
-        "--strategies", "token", "heuristic", "semantic", "hybrid",
-        "--cache-modes", "off",
-        "--nano-ip", "10.0.1.10",
-        "--orin-ip", "10.0.1.8",
-        "--output-csv", "benchmark_results_all.csv",
-        "--output-per-query-csv", "benchmark_per_query_all.csv",
-    ]
+    # import sys
+    # sys.argv += [
+    #     "--query-set", "general_knowledge",
+    #     "--thresholds", "100", "1000", "4000",
+    #     "--fixed-threshold", "4000",              # non-token runs once at 4000
+    #     "--strategies", "token", "heuristic", "semantic", "hybrid",
+    #     "--cache-modes", "off",
+    #     "--nano-ip", "10.0.1.10",
+    #     "--orin-ip", "10.0.1.8",
+    #     "--output-csv", "benchmark_results_all.csv",
+    #     "--output-per-query-csv", "benchmark_per_query_all.csv",
+    # ]
     main()

@@ -1,0 +1,2 @@
+query_set,strategy,cache_mode,token_threshold,query_index,query_text,expected_device,device_used,cache_hit,routing_method,routing_confidence,routing_reasoning,routing_overhead_ms,start_time,end_time,latency_ms,response_tokens,energy_mJ,latency_per_token_ms,energy_per_token_mJ
+general_knowledge,token,off,1000,0,List the top five most significant scientific discoveries in the last 50 years and explain their impact.,,nano,False,token,0.978,tokens=22 threshold=1000,108.01,2026-01-31 16:13:48.436338,2026-01-31 16:14:48.324560,59888,70,286504.647,855.5428571428571,4092.9235337
