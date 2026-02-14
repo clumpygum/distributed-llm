@@ -245,93 +245,87 @@ class SemanticRouter(BaseRouter):
 # Heuristic Strategy (Optimized)
 # ----------------------------
 
+import re
+from typing import Dict, Any, Tuple, Optional
+
+# Assuming BaseRouter, TokenBasedRouter, and RoutingDecision are imported
+
 class HeuristicRouter(BaseRouter):
     """
     Conservative rule-based router with PRE-COMPILED regex for performance.
+    Optimized to catch everyday queries and prevent excessive token fallbacks.
     """
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
 
-        self.long_text_threshold = int(config.get("heuristic_long_chars", 220))
-        self.multi_question_threshold = int(config.get("heuristic_multi_qmarks", 2))
+        self.long_text_threshold = int(config.get("heuristic_long_chars", 250)) # Slightly bumped
+        self.multi_question_threshold = int(config.get("heuristic_multi_qmarks", 3)) # Bumped to 3 to avoid penalizing "Hi? Are you there?"
         self.code_markers_needed = int(config.get("heuristic_code_markers_needed", 2))
         self.context_chars_threshold = int(config.get("heuristic_context_chars", 800))
 
         self._token_fallback = TokenBasedRouter(config)
 
-        # Raw patterns
+        # Raw patterns - Broadened to catch more intents
         raw_complex_patterns = {
             "code_build_debug": [
-                r"\b(write|implement|code|program|script|build|refactor)\b",
-                r"\b(debug|fix|traceback|exception|error|segfault|timeout|hanging)\b",
-                r"\b(api|flask|fastapi|docker|kubernetes|ssh|tunnel|port-forward|nginx)\b",
+                r"\b(write|implement|code|program|script|build|refactor|debug|fix)\b",
+                r"\b(traceback|exception|error|segfault|timeout|hanging)\b",
+                r"\b(api|flask|fastapi|docker|kubernetes|ssh|tunnel|nginx)\b",
                 r"\b(system design|architecture|distributed|scalability|load balanc)\b",
             ],
             "math_cs_theory": [
-                r"\b(prove|lemma|theorem|corollary)\b",
-                r"\b(derivative|integral|gradient|jacobian)\b",
+                r"\b(prove|lemma|theorem|corollary|derivative|integral|gradient)\b",
                 r"\b(time complexity|space complexity|big[- ]o)\b",
                 r"\b(dynamic programming|dp|graph|dijkstra|bfs|dfs)\b", 
-                r"(?:\b|^)a\*(?:\s|$|\W)"  # <--- FIXED: Matches "A*" followed by space/end/punctuation
+                r"(?:\b|^)a\*(?:\s|$|\W)"
+            ],
+            "reasoning_comparison": [
+                r"\b(compare|contrast|difference between|pros and cons|vs\.?|versus)\b",
+                r"\b(evaluate|assess|critique|analyze)\b",
             ],
             "long_form_generation": [
                 r"\b(essay|report|proposal|research paper|literature review|methodology)\b",
-                r"\b(comprehensive|in-depth|step by step|detailed)\b",
+                r"\b(comprehensive|in-depth|step[- ]by[- ]step|detailed)\b",
                 r"\b(summarize|synthesis)\b.*\b(everything|all|so far|entire)\b",
-                r"\b(transcript|debate|dialogue)\b",
+                r"\b(transcript|debate|dialogue|format as json|markdown table)\b",
             ],
             "data_engineering": [
-                r"\b(etl|pipeline|spark|hadoop|presto|sql)\b",
-                r"\b(csv|excel|dataframe|dataset)\b",
+                r"\b(etl|pipeline|spark|hadoop|presto|sql|csv|excel|dataframe|dataset)\b",
                 r"\b(deduplicate|normalize|clean|transform|parse|extract)\b",
             ],
-
             "medical_analysis": [
-                # Symptoms & Conditions
-                r"\b(symptom|diagnosis|treatment|therapy|prognosis)\b",
+                r"\b(symptom|diagnosis|treatment|therapy|prognosis|chronic|severe)\b",
                 r"\b(pain|migraine|dizziness|fatigue|nausea|inflammation|anxiety|depression)\b",
-                r"\b(chronic|severe|acute|persistent|worsen|trigger)\b",
-                
-                # Complex Requests
-                r"\b(analyze|analysis|consultation|evaluate|assess)\b.*\b(health|symptom|condition)\b",
                 r"\b(dietary|meal|training|exercise|recovery)\b.*\b(plan|schedule|regimen)\b",
-                r"\b(mental health|psycholog|counseling|therapist)\b",
-                
-                # Safety / Urgency
-                r"\b(seek medical|doctor|physician|emergency|hospital)\b",
+                r"\b(mental health|psycholog|counseling|therapist|physician|hospital)\b",
             ],
-            
             "context_heavy": [
                 r"\b(using (all|the) (context|history|above)|based on (the|our) (conversation|context))\b",
                 r"\b(continue|expand|build on|follow up)\b.*\b(previous|earlier|above)\b",
             ],
         }
 
+        # Removed strict ^ and $ anchors so it catches queries embedded in polite requests
         raw_simple_patterns = {
             "greeting": [
-                r"^(hi|hello|hey|yo|sup)\b",
-                r"^good (morning|afternoon|evening)\b",
-                r"^(thanks|thank you)\b",
+                r"\b(hi|hello|hey|yo|sup)\b",
+                r"\bgood (morning|afternoon|evening)\b",
+                r"\b(thanks|thank you)\b",
             ],
-
+            "general_knowledge": [
+                r"\b(what is|who is|where is|when is|when did|how many|capital of)\b",
+                r"\b(tell me a joke|fun fact|random fact)\b",
+                r"\b(how to|how do i|can you tell me)\b"
+            ],
             "wellness_tips": [
-                # General Health Facts
-                r"\b(benefits? of|tips? for|advice on)\b.*\b(sleep|water|walking|stretching|fruit|veg)\b",
-                r"\b(daily intake|how often|how much)\b.*\b(water|calories|steps|sleep)\b",
+                r"\b(benefits? of|tips? for|advice on)\b",
+                r"\b(daily intake|how often|how much)\b",
                 r"\b(healthy|good)\b.*\b(habit|routine|lifestyle)\b",
-                
-                # Simple Definitions
-                r"^what is (bmi|calories|metabolism|hydration)\??$",
-                r"^define (insomnia|nutrition|cardio)\??$",
             ],
-
             "short_definition": [
-                r"^define\b",
-                r"^what does .+ mean\??$",
-            ],
-            "short_wh": [
-                r"^(what|who|when|where)\b.*\?$",
+                r"\b(define|meaning of|definition of)\b",
+                r"\bwhat does\b.*\bmean\b",
             ],
             "tiny_math": [
                 r"^\s*\d+\s*[\+\-\*/]\s*\d+\s*\??\s*$",
@@ -339,7 +333,6 @@ class HeuristicRouter(BaseRouter):
             ],
         }
 
-        # Pre-compile regex
         self.complex_patterns = {
             k: [re.compile(p, re.IGNORECASE) for p in v] 
             for k, v in raw_complex_patterns.items()
@@ -368,17 +361,13 @@ class HeuristicRouter(BaseRouter):
         return False, None
 
     def _code_signal_count(self, query: str) -> int:
-        cnt = 0
-        for m in self._code_markers:
-            if m in query:
-                cnt += 1
-        return cnt
+        return sum(1 for m in self._code_markers if m in query)
 
     def route(self, query: str, context: Optional[str] = None) -> RoutingDecision:
         q = (query or "").strip()
         ql = q.lower()
 
-        # 1) strong complex patterns
+        # 1) Strong complex patterns
         is_complex, cat = self._match_category(ql, self.complex_patterns)
         if is_complex:
             return RoutingDecision(
@@ -388,7 +377,7 @@ class HeuristicRouter(BaseRouter):
                 reasoning=f"complex pattern={cat}",
             )
 
-        # 2) medium complex signals
+        # 2) Medium complex signals
         if len(q) >= self.long_text_threshold:
             return RoutingDecision(
                 device="orin",
@@ -421,7 +410,7 @@ class HeuristicRouter(BaseRouter):
                 reasoning=f"large context chars={len(context)}",
             )
 
-        # 3) strong simple patterns
+        # 3) Strong simple patterns
         is_simple, scat = self._match_category(ql, self.simple_patterns)
         if is_simple:
             return RoutingDecision(
@@ -431,16 +420,17 @@ class HeuristicRouter(BaseRouter):
                 reasoning=f"simple pattern={scat}",
             )
 
-        # 4) very short and harmless => nano
-        if len(ql.split()) <= 6 and len(q) <= 40:
+        # 4) Broadened harmless catch-all => nano
+        # Increased to 15 words / 100 chars to catch normal sentences that lack keywords
+        if len(ql.split()) <= 15 and len(q) <= 100:
             return RoutingDecision(
                 device="nano",
-                confidence=0.70,
+                confidence=0.75,
                 method="heuristic",
-                reasoning="very short query",
+                reasoning="short everyday query",
             )
 
-        # 5) fallback
+        # 5) Fallback
         d = self._token_fallback.route(query, context)
         return RoutingDecision(
             device=d.device,
@@ -449,8 +439,6 @@ class HeuristicRouter(BaseRouter):
             reasoning=f"no heuristic match -> {d.reasoning}",
             complexity_score=d.complexity_score,
         )
-
-
 # ----------------------------
 # Hybrid Strategy
 # ----------------------------
