@@ -41,3 +41,4 @@ coverage/
 # IDE
 .vscode/
 .idea/
+.venv/
