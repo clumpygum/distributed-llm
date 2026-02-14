@@ -46,3 +46,13 @@ coverage/
 venv/
 __pycache__/
 *.log
+
+# Data and Logs
+*.csv
+*.log
+data/results/
+
+# Python/OS
+__pycache__/
+.DS_Store
+.venv/
