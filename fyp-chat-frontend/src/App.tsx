@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Bot, ChevronDown, Moon, Sun } from 'lucide-react';
+import { Send, Bot, ChevronDown, Moon, Sun, Info } from 'lucide-react';
 import { ChatMessage } from './components/ChatMessage';
 import { TypingIndicator } from './components/TypingIndicator';
 
@@ -12,7 +12,7 @@ export interface Message {
   reasoning?: string;    // "tokens=500 > threshold"
 }
 
-type RoutingAlgorithm = 'token-counting' | 'semantic' | 'hybrid' | 'heuristic';
+type RoutingAlgorithm = 'token-counting' | 'semantic' | 'hybrid' | 'heuristic' | 'perf';
 
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([
@@ -150,7 +150,7 @@ export default function App() {
               <Bot className="w-6 h-6" />
             </div>
             <div>
-              <h1 className="text-xl font-semibold">Edge Router Demo</h1>
+              <h1 className="text-xl font-semibold">MediBot</h1>
               <p className="text-sm opacity-90">Nano (Light) vs Orin (Heavy)</p>
             </div>
           </div>
@@ -165,7 +165,8 @@ export default function App() {
                 <span>
                   {routingAlgorithm === 'token-counting' ? 'Token Counting' :
                    routingAlgorithm === 'heuristic' ? 'Heuristic' :
-                   routingAlgorithm === 'semantic' ? 'Semantic' : 'Hybrid'}
+                   routingAlgorithm === 'semantic' ? 'Semantic' :
+                   routingAlgorithm === 'perf' ? 'Performance Aware' : 'Hybrid'}
                 </span>
                 <ChevronDown className={`w-4 h-4 transition-transform ${isDropdownOpen ? 'rotate-180' : ''}`} />
               </button>
@@ -216,6 +217,17 @@ export default function App() {
                   >
                     Hybrid
                   </div>
+                  <div
+                    onClick={() => {
+                      setRoutingAlgorithm('perf');
+                      setIsDropdownOpen(false);
+                    }}
+                    className={`px-5 py-3 text-sm font-medium cursor-pointer transition-colors ${
+                      routingAlgorithm === 'perf' ? 'bg-blue-50 text-blue-700' : 'text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    Performance Aware
+                  </div>
                 </div>
               )}
             </div>
@@ -229,6 +241,21 @@ export default function App() {
             </button>
           </div>
         </div>
+
+        {/* Routing Info Banner */}
+        {routingAlgorithm === 'perf' && (
+          <div className="px-6 py-3 border-b flex items-start gap-3 
+            bg-blue-50 border-blue-200 text-blue-800 
+            dark:bg-blue-900/20 dark:border-blue-800 dark:text-blue-200">
+            
+            <Info className="w-5 h-5 flex-shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="text-sm">
+                <span className="font-semibold">Performance Aware Routing:</span> Routes based on live device performance; may vary per message.
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Messages Container */}
         <div className={`flex-1 overflow-y-auto p-6 space-y-4 ${isDarkMode ? 'bg-gray-800' : ''}`}>
