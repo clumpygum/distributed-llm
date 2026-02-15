@@ -1,13 +1,12 @@
-import { Bot, User, Cpu, Zap } from 'lucide-react';
+import { Bot, User, Cpu } from 'lucide-react';
 
-// Update interface to accept routing metadata
 export interface Message {
   id: string;
   text: string;
   sender: 'user' | 'bot';
   timestamp: Date;
-  device?: string;       // "nano" or "orin"
-  reasoning?: string;    // e.g. "Sim=0.85 > 0.4"
+  device?: string;
+  reasoning?: string;
 }
 
 interface ChatMessageProps {
@@ -20,7 +19,6 @@ export function ChatMessage({ message, isDarkMode = false }: ChatMessageProps) {
 
   return (
     <div className={`flex gap-3 ${isBot ? '' : 'flex-row-reverse'}`}>
-      {/* Avatar Circle */}
       <div
         className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center ${
           isBot 
@@ -30,11 +28,7 @@ export function ChatMessage({ message, isDarkMode = false }: ChatMessageProps) {
       >
         {isBot ? <Bot className="w-5 h-5" /> : <User className="w-5 h-5" />}
       </div>
-
-      {/* Message Content Area */}
       <div className={`flex-1 ${isBot ? '' : 'flex flex-col items-end'}`}>
-        
-        {/* The Text Bubble */}
         <div
           className={`inline-block max-w-[80%] p-4 rounded-2xl ${
             isBot
@@ -45,42 +39,35 @@ export function ChatMessage({ message, isDarkMode = false }: ChatMessageProps) {
           }`}
         >
           <p className="whitespace-pre-wrap break-words">{message.text}</p>
-        </div>
-
-        {/* Footer: Timestamp + Routing Badge */}
-        <div className="flex items-center gap-2 mt-1 px-2">
           
-          {/* 1. Timestamp */}
-          <span className={`text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-            {message.timestamp.toLocaleTimeString([], {
-              hour: '2-digit',
-              minute: '2-digit',
-            })}
-          </span>
-
-          {/* 2. DEVICE BADGE (New Feature) - Only show for Bot */}
-          {isBot && message.device && (
-            <div className="flex items-center gap-2 border-l pl-2 ml-1 border-gray-300/50">
-              {/* Badge */}
-              <span className={`text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1 font-semibold uppercase tracking-wide border ${
-                message.device === 'orin' 
-                  ? 'bg-purple-100 text-purple-700 border-purple-200 dark:bg-purple-900/30 dark:text-purple-300 dark:border-purple-700' 
-                  : 'bg-green-100 text-green-700 border-green-200 dark:bg-green-900/30 dark:text-green-300 dark:border-green-700'
-              }`}>
-                {message.device === 'orin' ? <Zap size={10} /> : <Cpu size={10} />}
-                {message.device}
-              </span>
-              
-              {/* Reasoning (Optional - truncates if too long) */}
+          {/* Display Device and Reasoning for Bot Messages */}
+          {isBot && (message.device || message.reasoning) && (
+            <div className={`mt-3 pt-3 border-t text-xs ${
+              isDarkMode ? 'border-gray-600' : 'border-gray-300'
+            }`}>
+              {message.device && (
+                <div className="flex items-center gap-2 mb-1">
+                  <Cpu className="w-3 h-3" />
+                  <span className={isDarkMode ? 'text-blue-300' : 'text-blue-600'}>
+                    Device: <strong>{message.device.toUpperCase()}</strong>
+                  </span>
+                </div>
+              )}
               {message.reasoning && (
-                <span className={`text-[10px] truncate max-w-[150px] hidden sm:block ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                <div className={`${isDarkMode ? 'text-gray-400' : 'text-gray-600'} italic`}>
                   {message.reasoning}
-                </span>
+                </div>
               )}
             </div>
           )}
         </div>
         
+        <span className={`text-xs mt-1 px-2 ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+          {message.timestamp.toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+          })}
+        </span>
       </div>
     </div>
   );
