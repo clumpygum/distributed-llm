@@ -15,8 +15,9 @@ app = Flask(__name__)
 OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
 MODEL_NAME = "phi3-mini-nano:latest"
 
-# Keep responses bounded for benchmarking
-DEFAULT_NUM_PREDICT = 64
+# -1 = let Ollama generate until the model naturally stops (EOS token).
+# Override per-request by passing {"num_predict": N} in the POST body.
+DEFAULT_NUM_PREDICT = -1
 DEFAULT_TEMPERATURE = 0.0
 
 
@@ -28,7 +29,6 @@ def home():
 
 @app.route("/health", methods=["GET"])
 def health():
-    # Lightweight health check (no inference)
     return jsonify({"ok": True}), 200
 
 
@@ -48,7 +48,7 @@ def process_query():
     # query is expected to be a list of {"role","content"}
     if isinstance(query, list):
         formatted_query = "\n".join(
-            f"{m.get('role','user')}: {m.get('content','')}" for m in query
+            f"{m.get('role', 'user')}: {m.get('content', '')}" for m in query
         ).strip()
     elif isinstance(query, str):
         formatted_query = query.strip()
@@ -58,25 +58,25 @@ def process_query():
     if not formatted_query:
         return jsonify({"error": "Empty query after formatting."}), 400
 
-    # Ollama payload (NON-STREAMING + bounded output)
+    # num_predict: caller can override, -1 means unlimited (natural EOS stop)
+    num_predict = int(data.get("num_predict", DEFAULT_NUM_PREDICT))
+
     payload = {
         "model": MODEL_NAME,
         "prompt": formatted_query,
         "stream": False,
         "options": {
-            "num_predict": int(data.get("num_predict", DEFAULT_NUM_PREDICT)),
+            "num_predict": num_predict,
             "temperature": float(data.get("temperature", DEFAULT_TEMPERATURE)),
         }
     }
 
-    app.logger.info("Running Ollama model via HTTP API...")
+    app.logger.info(f"Running Ollama (num_predict={num_predict})...")
     try:
-        # connect timeout 5s, read timeout 180s
         r = requests.post(OLLAMA_URL, json=payload, timeout=(5, 180))
         r.raise_for_status()
         out = r.json()
 
-        # Ollama returns {"response": "...", ...}
         resp_text = (out.get("response") or "").strip()
 
         app.logger.info(f"Ollama OK. chars={len(resp_text)}")
@@ -87,12 +87,9 @@ def process_query():
         return jsonify({"error": "Ollama timed out"}), 504
 
     except Exception as e:
-        # This logs stack trace into flask.log
         app.logger.exception("Ollama call failed")
-        # Keep error short but useful
         return jsonify({"error": f"Ollama call failed: {str(e)}"}), 500
 
 
 if __name__ == "__main__":
-    # threaded=True helps Flask handle concurrent requests better
     app.run(host="0.0.0.0", port=5001, threaded=True)
