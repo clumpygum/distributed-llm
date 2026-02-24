@@ -1,9 +1,12 @@
 """
-query_router_engine.py
+query_routing_engine.py
 
 Dynamic Query Router for Distributed Edge Chatbots on NVIDIA Jetson Platforms
 - Multiple routing strategies: token / semantic (trained centroids) / heuristic / hybrid / perf
-- Cache backed by QueryCache from cache.py (TTL-aware LRU, semantic similarity, persistence)
+- Cache backed by QueryCache from cache.py:
+    * Predictive routing via weighted routing history
+    * Context-aware override (heavy context overrides cached nano prediction)
+    * Hybrid re-route on low prediction confidence
 - Thread-safe implementation for production use
 """
 
@@ -19,7 +22,13 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import numpy as np
 
-from cache import CacheEntry, QueryCache  # noqa: E402
+try:
+    from cache import CacheEntry, CacheLookupResult, QueryCache
+except ImportError as _e:
+    raise ImportError(
+        "Could not import 'cache.py'. Ensure cache.py is in the same directory "
+        f"as query_routing_engine.py (or on PYTHONPATH). Original error: {_e}"
+    ) from _e
 
 logger = logging.getLogger(__name__)
 
@@ -453,7 +462,17 @@ class PerformanceAwareRouter(BaseRouter):
 # =============================================================================
 
 class QueryRouter:
-    """Strategy selector backed by QueryCache (from cache.py)."""
+    """
+    Strategy selector backed by QueryCache (from cache.py).
+
+    Cache hit routing logic:
+      1. Heavy context + cached nano prediction → hybrid re-route
+         (long conversation makes a previously-simple query complex)
+      2. Low prediction confidence (<threshold) → hybrid re-route
+         (mixed routing history, let the router break the tie)
+      3. High-confidence prediction, normal context → return predicted device
+         (could be nano OR orin depending on routing history)
+    """
 
     AVAILABLE_STRATEGIES = {
         "token": TokenBasedRouter,
@@ -475,14 +494,16 @@ class QueryRouter:
         self.cache_enabled = bool(self.config.get("cache_enabled", True))
 
         self._cache = QueryCache(
-            max_size=int(self.config.get("cache_max_size", 100)),
-            ttl_seconds=int(self.config.get("cache_ttl_seconds", 300)),
+            max_size=int(self.config.get("cache_max_size", 500)),
+            ttl_seconds=int(self.config.get("cache_ttl_seconds", 3600)),
             similarity_threshold=float(self.config.get("cache_similarity_threshold", 0.85)),
             use_semantic=bool(self.config.get("use_semantic_cache", True)),
-            # force_nano_on_hit is not a parameter — cache hits always route to nano.
+            prediction_confidence_threshold=float(
+                self.config.get("prediction_confidence_threshold", 0.70)
+            ),
         )
 
-        # Shared embedder — encoded once per query, passed to both lookup and insert
+        # Shared embedder — encoded once per query, reused for lookup + insert
         self.cache_embedder = None
         if SENTENCE_TRANSFORMERS_AVAILABLE and self.config.get("use_semantic_cache", True):
             model_name = self.config.get("embedding_model", "all-MiniLM-L6-v2")
@@ -494,22 +515,38 @@ class QueryRouter:
 
     def _default_config(self) -> Dict[str, Any]:
         return {
+            # ── Routing ───────────────────────────────────────────────────────
+            # token_threshold=1000 matches Ng Mu Rong FYP benchmarks:
+            # Nano degrades nonlinearly past 1000-1500 tokens.
             "token_threshold": 1000,
             "model": "meta-llama/Llama-2-7b-hf",
             "embedding_model": "all-MiniLM-L6-v2",
             "semantic_label_path": "src/tests/semantic_labels.json",
             "semantic_margin_threshold": 0.03,
             "semantic_min_similarity": 0.15,
-            "heuristic_long_chars": 220,
+            # heuristic_long_chars: 800 chars ≈ 200 tokens — clearly a long query
+            "heuristic_long_chars": 800,
             "heuristic_multi_qmarks": 2,
             "heuristic_code_markers_needed": 2,
-            "heuristic_context_chars": 800,
-            "weights": {"token": 0.35, "semantic": 0.35, "heuristic": 0.30},
-            "cache_enabled": True,
-            "cache_ttl_seconds": 300,
-            "cache_max_size": 100,
+            # heuristic_context_chars: 3200 chars ≈ 800 tokens — Nano sweet spot
+            # upper bound per Ng Mu Rong benchmarks (800-1200 token range).
+            # Previously 800 chars (~200 tokens) which was routing to Orin far
+            # too aggressively for context that Nano handles comfortably.
+            "heuristic_context_chars": 3200,
+            # Semantic gets the highest weight — it is the main FYP contribution.
+            # Token is a reliable fallback. Heuristic is fast and domain-specific.
+            "weights": {"token": 0.25, "semantic": 0.45, "heuristic": 0.30},
+            # ── Cache ─────────────────────────────────────────────────────────
+            # Set cache_enabled=False during benchmarking runs so routing
+            # accuracy is measured cleanly against every query (no cache bypasses).
+            # Enable for production deployment.
+            "cache_enabled": False,
+            "cache_ttl_seconds": 3600,
+            "cache_max_size": 500,
             "cache_similarity_threshold": 0.85,
             "use_semantic_cache": True,
+            "prediction_confidence_threshold": 0.70,
+            # ── Perf ──────────────────────────────────────────────────────────
             "perf_window": 30,
             "perf_fail_penalty": 3000.0,
         }
@@ -535,22 +572,74 @@ class QueryRouter:
                 logger.warning("Cache embedding failed, continuing without: %s", exc)
 
         if self.cache_enabled:
-            entry = self._cache.lookup(query, ctxk, q_emb)
-            if entry is not None:
-                # Cache hits ALWAYS route to nano — lightweight queries only.
-                age = int((datetime.now() - entry.timestamp).total_seconds())
+            result = self._cache.lookup(query, ctxk, q_emb)
+            if result is not None:
+                context_len = len(context) if context else 0
+                context_threshold = int(self.config.get("heuristic_context_chars", 800))
+
+                # ── Re-route condition 1: heavy context overrides cached nano ──
+                # The query may have been simple before, but a long conversation
+                # now makes it complex — trust the router over the cache.
+                context_override = (
+                    context_len >= context_threshold
+                    and result.predicted_device == "nano"
+                )
+
+                # ── Re-route condition 2: low prediction confidence ────────────
+                # Routing history is mixed — hybrid router breaks the tie and
+                # adds the new decision back to history to build confidence.
+                low_confidence = result.use_hybrid_fallback
+
+                if context_override or low_confidence:
+                    reason = (
+                        f"context_len={context_len}>={context_threshold} overrides cached nano"
+                        if context_override
+                        else f"low prediction confidence={result.predicted_confidence:.2f}"
+                    )
+                    logger.debug("Cache hit but re-routing via hybrid: %s", reason)
+
+                    decision = self.router.route(query, context)
+                    self._cache.insert(
+                        query, ctxk,
+                        device=decision.device,
+                        confidence=decision.confidence,
+                        method=decision.method,
+                        q_emb=q_emb,
+                    )
+                    decision.reasoning = (
+                        f"cache hit (hybrid re-route: {reason}) | " + decision.reasoning
+                    )
+                    decision.cache_hit = True
+                    return decision
+
+                # ── High-confidence prediction, normal context ─────────────────
+                # Return the device predicted by routing history (nano or orin).
+                age = int((datetime.now() - result.entry.timestamp).total_seconds())
                 return RoutingDecision(
-                    device="nano",
-                    confidence=1.0,
+                    device=result.predicted_device,
+                    confidence=result.predicted_confidence,
                     method=f"{self.strategy_name}_cached",
-                    reasoning=f"cache hit age={age}s hits={entry.hit_count} original={entry.device_used} -> nano",
+                    reasoning=(
+                        f"cache hit age={age}s hits={result.entry.hit_count} "
+                        f"predicted={result.predicted_device} "
+                        f"conf={result.predicted_confidence:.2f} "
+                        f"context_len={context_len} "
+                        f"history={len(result.entry.routing_history)}"
+                    ),
                     cache_hit=True,
                 )
 
+        # Cache miss — full routing, insert result into cache
         decision = self.router.route(query, context)
 
         if self.cache_enabled:
-            self._cache.insert(query, ctxk, decision.device, q_emb=q_emb)
+            self._cache.insert(
+                query, ctxk,
+                device=decision.device,
+                confidence=decision.confidence,
+                method=decision.method,
+                q_emb=q_emb,
+            )
 
         return decision
 
@@ -605,18 +694,45 @@ class QueryRouter:
 # Smoke test
 # =============================================================================
 
+# =============================================================================
+# Shared configs — import these in router.py, chatbot_tester.py, etc.
+# =============================================================================
+
+# Use during benchmarking: cache off so every query hits the router and
+# routing accuracy is measured cleanly with no cache bypasses.
+BENCHMARK_CFG = {
+    "token_threshold": 1000,
+    "model": "meta-llama/Llama-2-7b-hf",
+    "embedding_model": "all-MiniLM-L6-v2",
+    "semantic_label_path": "src/tests/semantic_labels.json",
+    "semantic_margin_threshold": 0.03,
+    "semantic_min_similarity": 0.15,
+    "heuristic_long_chars": 800,         # ~200 tokens
+    "heuristic_multi_qmarks": 2,
+    "heuristic_code_markers_needed": 2,
+    "heuristic_context_chars": 3200,     # ~800 tokens — Nano sweet spot upper bound
+    "weights": {"token": 0.25, "semantic": 0.45, "heuristic": 0.30},
+    "cache_enabled": False,              # OFF — clean routing accuracy measurement
+    "perf_window": 30,
+    "perf_fail_penalty": 3000.0,
+}
+
+# Use in production: cache on, responses served from history on repeat queries.
+PRODUCTION_CFG = {
+    **BENCHMARK_CFG,
+    "cache_enabled": True,
+    "cache_ttl_seconds": 3600,
+    "cache_max_size": 500,
+    "cache_similarity_threshold": 0.85,
+    "use_semantic_cache": True,
+    "prediction_confidence_threshold": 0.70,
+}
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
-    cfg = {
-        "token_threshold": 1200,
-        "cache_enabled": True,
-        "use_semantic_cache": True,
-        "cache_force_nano": True,
-        "semantic_label_path": "src/tests/semantic_labels.json",
-        "semantic_margin_threshold": 0.03,
-        "weights": {"token": 0.35, "semantic": 0.35, "heuristic": 0.30},
-    }
+    cfg = BENCHMARK_CFG
 
     qr = QueryRouter(strategy="hybrid", config=cfg)
 
@@ -637,7 +753,7 @@ if __name__ == "__main__":
 
     print("\nCache stats:", qr.get_cache_stats())
 
-    print("\n--- Second pass (cache hits expected) ---")
+    print("\n--- Second pass (predictive routing from history) ---")
     for t in tests:
         d = qr.route_query(t, context_key="demo")
         print(f"{t!r:55} => {d.device:4}  [{d.method}]  cache_hit={d.cache_hit}")

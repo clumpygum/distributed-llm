@@ -1,32 +1,51 @@
 import hashlib
+import json
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from token_counter import TokenCounter
-from query_router_engine import QueryRouter  # fixed: was query_router_engine
+from query_router_engine import QueryRouter, BENCHMARK_CFG, PRODUCTION_CFG
 from models.orin import Orin
 from models.nano import Nano
 
 
 class Router:
-    def __init__(self, strategy: str = "token", config: Optional[Dict[str, Any]] = None, threshold_fallback: int = 100):
+    def __init__(
+        self,
+        strategy: str = "hybrid",
+        config: Optional[Dict[str, Any]] = None,
+        threshold_fallback: int = 100,
+        benchmark_mode: bool = False,
+    ):
         """
-        strategy:           "token" | "semantic" | "heuristic" | "hybrid" | "perf"
-        config:             dict for QueryRouter + caching knobs
-        threshold_fallback: token count used only if QueryRouter itself raises
+        strategy:         "token" | "semantic" | "heuristic" | "hybrid" | "perf"
+        config:           override dict — defaults to BENCHMARK_CFG or PRODUCTION_CFG
+                          based on benchmark_mode if not provided
+        threshold_fallback: token count fallback used only if QueryRouter raises
+        benchmark_mode:   True  → BENCHMARK_CFG (cache off, clean accuracy measurement)
+                          False → PRODUCTION_CFG (cache on, predictive routing)
         """
         self.token_counter = TokenCounter()
         self.orin = Orin()
         self.nano = Nano()
 
         self.threshold_fallback = threshold_fallback
-        self.config = config or {}
+        self.benchmark_mode = benchmark_mode
+
+        # Resolve config: explicit override > benchmark/production default
+        if config is not None:
+            self.config = config
+        else:
+            self.config = BENCHMARK_CFG if benchmark_mode else PRODUCTION_CFG
+
         self.query_router = QueryRouter(strategy=strategy, config=self.config)
 
-        # Response cache — delegate to QueryRouter's built-in QueryCache
-        # so we don't maintain a second LRU store.
-        self.enable_response_cache = bool(self.config.get("enable_response_cache", False))
+        # Response cache — only active in production mode and only if explicitly enabled
+        self.enable_response_cache = (
+            not benchmark_mode
+            and bool(self.config.get("enable_response_cache", False))
+        )
 
         # Context hashing for cache key correctness (last-k turns)
         self.cache_last_k = int(self.config.get("cache_last_k", 6))
@@ -55,7 +74,6 @@ class Router:
             return response.strip() or None
 
         if isinstance(response, dict):
-            # Common happy-path keys
             for key in ("response", "content", "message"):
                 val = response.get(key)
                 if isinstance(val, str) and val.strip():
@@ -156,30 +174,47 @@ class Router:
         return f"{self.query_router.strategy}|{ctx_hash}|{query.lower().strip()}"
 
     def _get_response_cache(self, key: str) -> Optional[Dict]:
-        """Retrieve from QueryRouter's cache store."""
+        """
+        Retrieve a cached response payload from QueryRouter's cache store.
+        Returns the payload dict or None on miss.
+        """
         if not self.enable_response_cache:
             return None
-        entry = self.query_router._cache.lookup(key, context_key="response_cache")
-        if entry is None:
+
+        cache = getattr(self.query_router, "_cache", None)
+        if cache is None:
+            raise RuntimeError(
+                "'QueryRouter' has no '_cache' attribute. "
+                "Ensure you are using the updated query_routing_engine.py and that "
+                "cache.py is in the same directory (or on PYTHONPATH)."
+            )
+
+        # lookup() returns CacheLookupResult, not a bare CacheEntry
+        result = cache.lookup(key, context_key="response_cache")
+        if result is None:
             return None
-        # We stash the payload JSON-encoded in entry.query field (small hack —
-        # no extra store needed).
+
         try:
-            import json
-            return json.loads(entry.query)
+            return json.loads(result.entry.query)
         except Exception:
             return None
 
     def _set_response_cache(self, key: str, payload: Dict) -> None:
-        """Store in QueryRouter's cache store."""
+        """Store a response payload in QueryRouter's cache store."""
         if not self.enable_response_cache:
             return
+
+        cache = getattr(self.query_router, "_cache", None)
+        if cache is None:
+            return  # silently skip — error will surface on next lookup
+
         try:
-            import json
-            self.query_router._cache.insert(
-                query=json.dumps(payload),   # payload serialised as the "query"
+            cache.insert(
+                query=json.dumps(payload),
                 context_key="response_cache",
-                device="nano",  # cache hits always route to nano
+                device=payload.get("device", "nano"),
+                confidence=payload.get("routing_confidence", 1.0),
+                method="response_cache",
             )
         except Exception:
             pass
@@ -190,7 +225,7 @@ class Router:
 
     def route_query(self, conversation_history: List[Dict]) -> Tuple[Dict, int, str]:
         """
-        Main entry point.  Returns:
+        Main entry point. Returns:
           (response_dict, response_tokens, device_string)
 
         response_dict keys:
@@ -199,14 +234,14 @@ class Router:
         """
         query, context, ctx_hash = self._history_to_query_and_context(conversation_history)
 
-        # ── 0) Response cache check ────────────────────────────────────
+        # ── 0) Response cache check (production mode only) ────────────
         if self.enable_response_cache:
             cache_key = self._response_cache_key(ctx_hash, query)
             cached = self._get_response_cache(cache_key)
             if cached is not None:
                 text = cached.get("text", "")
                 raw = cached.get("raw")
-                # Cache hits ALWAYS route to nano.
+                which = cached.get("device", "nano")
                 response_tokens = self.token_counter.count_tokens(
                     {"role": "assistant", "content": text}
                 )
@@ -216,10 +251,10 @@ class Router:
                     "cache_hit": True,
                     "routing_method": "response_cache",
                     "routing_confidence": 1.0,
-                    "routing_reasoning": "response cache hit -> nano",
+                    "routing_reasoning": f"response cache hit -> {which}",
                     "routing_overhead_ms": 0.0,
                     "ok": True,
-                }, response_tokens, "nano"
+                }, response_tokens, which
 
         # ── 1) Routing decision ────────────────────────────────────────
         t0 = time.time()
@@ -237,6 +272,7 @@ class Router:
             routing_confidence = float(decision.confidence)
             routing_reasoning = decision.reasoning
             print(
+                f"[{'BENCH' if self.benchmark_mode else 'PROD'}] "
                 f"Routing decision: {device.upper()} | method={decision.method} "
                 f"| conf={decision.confidence:.3f}"
             )
@@ -280,17 +316,23 @@ class Router:
         except Exception:
             pass
 
-        # ── 5) Store in response cache ─────────────────────────────────
+        # ── 5) Store in response cache (production only) ───────────────
         if self.enable_response_cache:
             self._set_response_cache(
                 self._response_cache_key(ctx_hash, query),
-                {"text": text, "raw": raw, "device": which},
+                {
+                    "text": text,
+                    "raw": raw,
+                    "device": which,
+                    "routing_confidence": round(routing_confidence, 4),
+                },
             )
 
         return {
             "response": text,
             "raw": raw,
             "cache_hit": False,
+            "benchmark_mode": self.benchmark_mode,
             "routing_overhead_ms": round(routing_overhead_ms, 2),
             "routing_method": routing_method,
             "routing_confidence": round(routing_confidence, 4),
