@@ -678,8 +678,8 @@ if __name__ == "__main__":
         "--thresholds", "100", "500", "1000", "2000", "4000",
         "--fixed-threshold", "1000",              # non-token runs once at 1000
         "--strategies", "token", "heuristic", "semantic", "hybrid", "perf",
-        "--cache-modes", "off", "on",
-        "--nano-ip", "10.0.1.10",
+        "--cache-modes", "off",
+        "--nano-ip", "10.0.1.11",
         "--orin-ip", "10.0.1.8",
         "--output-csv", "results_final.csv",
         "--output-per-query-csv", "benchmark_per_query_all.csv",
