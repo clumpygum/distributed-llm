@@ -71,7 +71,7 @@ pip install -r requirements.txt
 ### 2. Device Configuration
 
 Ensure both Jetson devices are reachable on your network and have Ollama installed and running.
-* Jetson Nano: 10.0.1.10 (Example IP)
+* Jetson Nano: 10.0.1.11 (Example IP)
 * Jetson Orin: 10.0.1.8 (Example IP)
 
 ### 3. Environment Variables
