@@ -215,8 +215,7 @@ export default function App() {
         )}
 
         {/* Messages */}
-        <div className={`flex-1 min-h-0 overflow-y-auto p-6 ${isDarkMode ? 'bg-gray-800' : ''}`}>
-          <div className="flex flex-col justify-end min-h-full space-y-4">
+        <div className={`flex-1 min-h-0 overflow-y-auto p-6 space-y-4 ${isDarkMode ? 'bg-gray-800' : ''}`}>
           {messages.map((message) => (
             <ChatMessage key={message.id} message={message} isDarkMode={isDarkMode} />
           ))}
@@ -245,7 +244,6 @@ export default function App() {
 
           {isTyping && <TypingIndicator isDarkMode={isDarkMode} />}
           <div ref={messagesEndRef} />
-          </div>
         </div>
 
         {/* Input area */}
