@@ -15,7 +15,7 @@ What it measures:
 
 Assumptions (same as your setup):
 - Run with PYTHONPATH=src
-- Router(strategy=..., config=..., threshold_fallback=...)
+- Router(strategy=..., config=..., threshold_fallback=..., benchmark_mode=...)
 - Router exposes router.nano.server_manager and router.orin.server_manager
 - Devices have ~/murong/logging_power.py that writes ~/murong/power.log
 """
@@ -31,9 +31,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import pexpect
 
 from router import Router
+from query_router_engine import BENCHMARK_CFG, PRODUCTION_CFG
 from query_sets import query_sets
 
-import os
 print("RUNNING TESTER:", os.path.abspath(__file__), flush=True)
 
 
@@ -259,33 +259,15 @@ def energy_for_window(power_data: Dict[datetime, int], start: datetime, end: dat
 # -----------------------------
 
 def build_router_config(cache_enabled: bool, token_threshold: int) -> Dict[str, Any]:
-    return {
-        # token
-        "token_threshold": token_threshold,
-        "model": "meta-llama/Llama-2-7b-hf",  # optional if you use litellm token_counter
+    """
+    Build config from the canonical BENCHMARK_CFG / PRODUCTION_CFG defined in
+    query_routing_engine.py, then override token_threshold for the sweep.
 
-        # semantic (ONLY if your SemanticRouter expects a label file)
-        "embedding_model": "all-MiniLM-L6-v2",
-        "semantic_label_path": "src/tests/semantic_labels.json",  # <- create this
-        "semantic_margin_threshold": 0.03,  # smaller => more decisive, bigger => more “uncertain”
-
-        # hybrid weights
-        "weights": {"token": 0.35, "semantic": 0.35, "heuristic": 0.30},
-
-        # heuristic tuning (optional if your heuristic supports these)
-        "heuristic_long_chars": 220,
-        "heuristic_multi_qmarks": 2,
-        "heuristic_code_markers_needed": 2,
-        "heuristic_context_chars": 800,
-
-        # cache
-        "cache_enabled": cache_enabled,
-        "cache_ttl_seconds": 300,
-        "cache_max_size": 100,
-        "cache_similarity_threshold": 0.85,
-        "use_semantic_cache": True,
-        "cache_force_nano": True,
-    }
+    cache_enabled=False  →  BENCHMARK_CFG  (cache off, clean accuracy measurement)
+    cache_enabled=True   →  PRODUCTION_CFG (cache on, predictive routing)
+    """
+    base = PRODUCTION_CFG if cache_enabled else BENCHMARK_CFG
+    return {**base, "token_threshold": token_threshold}
 
 
 def try_clear_cache(router: Router) -> None:
@@ -372,6 +354,9 @@ def run_experiment(query_items: List[QueryItem], run_cfg: RunConfig, ssh_cfg: SS
     for strategy in run_cfg.strategies:
         for cache_mode in run_cfg.cache_modes:
             cache_enabled = (cache_mode.lower() == "on")
+            # cache_enabled=False → benchmark_mode=True  (BENCHMARK_CFG, cache off)
+            # cache_enabled=True  → benchmark_mode=False (PRODUCTION_CFG, cache on)
+            benchmark_mode = not cache_enabled
 
             thresholds_to_run = (
                 run_cfg.thresholds
@@ -383,10 +368,20 @@ def run_experiment(query_items: List[QueryItem], run_cfg: RunConfig, ssh_cfg: SS
                 config = build_router_config(cache_enabled=cache_enabled, token_threshold=threshold)
 
                 try:
-                    router = Router(strategy=strategy, config=config, threshold_fallback=threshold)
+                    router = Router(
+                        strategy=strategy,
+                        config=config,
+                        threshold_fallback=threshold,
+                        benchmark_mode=benchmark_mode,
+                    )
                 except Exception as e:
                     print(f"[skip] strategy={strategy} cache={cache_mode} thr={threshold} -> {e}")
                     continue
+
+                print(
+                    f"[run] strategy={strategy} cache={cache_mode} "
+                    f"benchmark_mode={benchmark_mode} threshold={threshold}"
+                )
 
                 # Start servers (idempotent)
                 try:
@@ -492,7 +487,7 @@ def run_experiment(query_items: List[QueryItem], run_cfg: RunConfig, ssh_cfg: SS
 
                 all_rows.extend(per_rows)
 
-                # Optional: stop servers after each experiment config to reduce weird state carryover
+                # Stop servers after each experiment config to reduce state carryover
                 try:
                     router.nano.server_manager.stop_server()
                 except Exception:
@@ -623,7 +618,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--strategies", nargs="+", default=["token", "heuristic", "semantic", "hybrid"],
                    help="Strategies to test")
     p.add_argument("--cache-modes", nargs="+", default=["off"], choices=["off", "on"],
-                   help="Cache modes to test")
+                   help="Cache modes to test. 'off' = benchmark_mode (clean accuracy), 'on' = production_mode (predictive cache)")
 
     p.add_argument("--output-csv", default="benchmark_results.csv")
     p.add_argument("--output-per-query-csv", default="benchmark_per_query.csv")
@@ -683,7 +678,7 @@ if __name__ == "__main__":
         "--thresholds", "100", "500", "1000", "2000", "4000",
         "--fixed-threshold", "1000",              # non-token runs once at 1000
         "--strategies", "token", "heuristic", "semantic", "hybrid", "perf",
-        "--cache-modes", "off","on",
+        "--cache-modes", "off", "on",
         "--nano-ip", "10.0.1.10",
         "--orin-ip", "10.0.1.8",
         "--output-csv", "results_final.csv",

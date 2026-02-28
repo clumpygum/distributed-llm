@@ -726,6 +726,7 @@ PRODUCTION_CFG = {
     "cache_similarity_threshold": 0.85,
     "use_semantic_cache": True,
     "prediction_confidence_threshold": 0.70,
+    "enable_response_cache": True,
 }
 
 
