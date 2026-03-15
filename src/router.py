@@ -53,6 +53,11 @@ class Router:
         # Optional failover if the chosen device returns an error
         self.enable_failover = bool(self.config.get("enable_failover", True))
 
+        # Simple in-memory response payload store
+        # Keys on strategy + query text only (not context) so identical questions
+        # hit the cache regardless of conversation history length
+        self._response_payload_store: Dict[str, Dict] = {}
+
     # ------------------------------------------------------------------
     # Back-compat API
     # ------------------------------------------------------------------
@@ -166,58 +171,26 @@ class Router:
         return raw, which, lat_ms
 
     # ------------------------------------------------------------------
-    # Response cache helpers (backed by QueryRouter's QueryCache)
+    # Response cache helpers (simple in-memory dict)
+    # Keys on strategy + query text only — context-independent so identical
+    # questions always hit regardless of conversation history length.
     # ------------------------------------------------------------------
 
     def _response_cache_key(self, ctx_hash: str, query: str) -> str:
-        """Unique key combining routing strategy, context hash, and query."""
-        return f"{self.query_router.strategy}|{ctx_hash}|{query.lower().strip()}"
+        """Unique key combining routing strategy and query text only."""
+        return f"{self.query_router.strategy}|{query.lower().strip()}"
 
     def _get_response_cache(self, key: str) -> Optional[Dict]:
-        """
-        Retrieve a cached response payload from QueryRouter's cache store.
-        Returns the payload dict or None on miss.
-        """
+        """Retrieve a cached response payload. Returns payload dict or None on miss."""
         if not self.enable_response_cache:
             return None
-
-        cache = getattr(self.query_router, "_cache", None)
-        if cache is None:
-            raise RuntimeError(
-                "'QueryRouter' has no '_cache' attribute. "
-                "Ensure you are using the updated query_routing_engine.py and that "
-                "cache.py is in the same directory (or on PYTHONPATH)."
-            )
-
-        # lookup() returns CacheLookupResult, not a bare CacheEntry
-        result = cache.lookup(key, context_key="response_cache")
-        if result is None:
-            return None
-
-        try:
-            return json.loads(result.entry.query)
-        except Exception:
-            return None
+        return self._response_payload_store.get(key)
 
     def _set_response_cache(self, key: str, payload: Dict) -> None:
-        """Store a response payload in QueryRouter's cache store."""
+        """Store a response payload in the in-memory cache."""
         if not self.enable_response_cache:
             return
-
-        cache = getattr(self.query_router, "_cache", None)
-        if cache is None:
-            return  # silently skip — error will surface on next lookup
-
-        try:
-            cache.insert(
-                query=json.dumps(payload),
-                context_key="response_cache",
-                device=payload.get("device", "nano"),
-                confidence=payload.get("routing_confidence", 1.0),
-                method="response_cache",
-            )
-        except Exception:
-            pass
+        self._response_payload_store[key] = payload
 
     # ------------------------------------------------------------------
     # Public API
@@ -237,7 +210,9 @@ class Router:
         # ── 0) Response cache check (production mode only) ────────────
         if self.enable_response_cache:
             cache_key = self._response_cache_key(ctx_hash, query)
+            print(f"[DEBUG] Response cache key: {cache_key}")
             cached = self._get_response_cache(cache_key)
+            print(f"[DEBUG] Cache result: {'HIT' if cached is not None else 'MISS'}")
             if cached is not None:
                 text = cached.get("text", "")
                 raw = cached.get("raw")
@@ -245,6 +220,7 @@ class Router:
                 response_tokens = self.token_counter.count_tokens(
                     {"role": "assistant", "content": text}
                 )
+                print(f"[RESPONSE CACHE HIT] Returning cached response -> {which.upper()}")
                 return {
                     "response": text,
                     "raw": raw,

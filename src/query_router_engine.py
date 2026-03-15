@@ -126,7 +126,7 @@ class SemanticRouter(BaseRouter):
         self.embedder = SentenceTransformer(model_name)
         self.label_path = config.get("semantic_label_path", "")
         self.margin_threshold = float(config.get("semantic_margin_threshold", 0.03))
-        self.min_similarity = float(config.get("semantic_min_similarity", 0.15))
+        self.min_similarity = float(config.get("semantic_min_similarity", 0.05))
         self._token_fallback = TokenBasedRouter(config)
         self.nano_center, self.orin_center = self._load_and_build_centroids(self.label_path)
 
@@ -524,7 +524,7 @@ class QueryRouter:
             "embedding_model": "all-MiniLM-L6-v2",
             "semantic_label_path": "src/tests/semantic_labels.json",
             "semantic_margin_threshold": 0.03,
-            "semantic_min_similarity": 0.15,
+            "semantic_min_similarity": 0.05,
             # heuristic_long_chars: 800 chars ≈ 200 tokens — clearly a long query
             "heuristic_long_chars": 800,
             "heuristic_multi_qmarks": 2,
@@ -707,7 +707,7 @@ BENCHMARK_CFG = {
     "embedding_model": "all-MiniLM-L6-v2",
     "semantic_label_path": "src/tests/semantic_labels.json",
     "semantic_margin_threshold": 0.03,
-    "semantic_min_similarity": 0.15,
+    "semantic_min_similarity": 0.05,
     "heuristic_long_chars": 800,         # ~200 tokens
     "heuristic_multi_qmarks": 2,
     "heuristic_code_markers_needed": 2,

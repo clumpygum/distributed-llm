@@ -1,5 +1,6 @@
 import { Bot, User, Cpu, Zap } from 'lucide-react';
 import { Message } from '../App';
+import ReactMarkdown from 'react-markdown';
 
 interface ChatMessageProps {
   message: Message;
@@ -46,7 +47,11 @@ export function ChatMessage({ message, isDarkMode = false }: ChatMessageProps) {
               : 'bg-blue-600 text-white rounded-tr-sm'
           }`}
         >
-          <p className="whitespace-pre-wrap break-words">{message.text}</p>
+          <div className="whitespace-pre-wrap break-words">
+            <ReactMarkdown>
+              {message.text}
+            </ReactMarkdown>
+          </div>
 
           {/* Routing metadata panel — only shown on bot messages */}
           {hasMetadata && (

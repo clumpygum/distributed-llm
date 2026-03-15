@@ -159,7 +159,7 @@ export default function App() {
               <Bot className="w-5 h-5" />
             </div>
             <div>
-              <h1 className={`font-semibold text-lg ${isDarkMode ? 'text-white' : 'text-gray-800'}`}>Edge Cluster Chat</h1>
+              <h1 className={`font-semibold text-lg ${isDarkMode ? 'text-white' : 'text-gray-800'}`}>Medibot</h1>
               <p className={`text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>Nano + Orin · {algorithmLabels[routingAlgorithm]}</p>
             </div>
           </div>
