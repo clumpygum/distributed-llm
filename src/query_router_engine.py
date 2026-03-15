@@ -371,6 +371,7 @@ class HeuristicRouter(BaseRouter):
 class HybridRouter(BaseRouter):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
+        "Score = (w_token × conf_token) + (w_semantic × conf_semantic) + (w_heuristic × conf_heuristic)"
         self.weights = config.get("weights", {"token": 0.35, "semantic": 0.35, "heuristic": 0.30})
         self.routers = {
             "token": TokenBasedRouter(config),

@@ -134,7 +134,7 @@ class Router:
         # Stable cache key from last-k turns
         compact = [
             f"{m.get('role', '')}:{(m.get('content') or '').strip()}"
-            for m in conversation_history[-self.cache_last_k:]
+            for m in ctx_msgs[-self.cache_last_k:]
             if isinstance(m, dict)
         ]
         ctx_hash = hashlib.sha256("\n".join(compact).encode("utf-8")).hexdigest()[:16]
@@ -267,6 +267,8 @@ class Router:
             decision = self.query_router.route_query(
                 query=query, context=context, context_key=ctx_hash
             )
+            if decision.cache_hit:
+                print(f"[CACHE HIT] Routing Cache hit for: '{query[:50]}'")
             device = decision.device
             routing_method = decision.method
             routing_confidence = float(decision.confidence)

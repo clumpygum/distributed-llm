@@ -6,8 +6,6 @@ app = Flask(__name__)
 CORS(app)
 
 # Default configuration
-# FIX 4: Restored heuristic weight to its meaningful default (was 0.0, which
-# silently disabled it in hybrid mode).
 base_config = {
     "cache_enabled": True,
     "enable_response_cache": True,

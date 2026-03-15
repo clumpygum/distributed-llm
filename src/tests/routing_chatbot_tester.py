@@ -674,7 +674,7 @@ if __name__ == "__main__":
     # Optional: local default run without CLI typing
     import sys
     sys.argv += [
-        "--query-set", "general_knowledge",
+        "--query-set", "personal_health",
         "--thresholds", "100", "500", "1000", "2000", "4000",
         "--fixed-threshold", "1000",              # non-token runs once at 1000
         "--strategies", "token", "heuristic", "semantic", "hybrid", "perf",
